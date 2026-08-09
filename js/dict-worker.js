@@ -19,7 +19,17 @@
 
 var tokenizer = null;
 var HOOK_ANCHOR = "BrowserDictionaryLoader.prototype.loadArrayBuffer = function (url, callback) {";
-var HOOK_INJECT = HOOK_ANCHOR + " if (self.__fastLoad) { self.__fastLoad(url, callback); return; }";
+/* 注入兩件事：
+   (1) 修正被 path.join 破壞的網址。kuromoji 用 path.join(dic_path, filename)
+       組網址，而 Node 的 path.join 會把 "https://host/" 正規化成 "https:/host/"。
+       依 WHATWG URL 規範，當 scheme 與目前頁面相同時，"https:/host/x" 會被當成
+       相對路徑，於是解析成 https://自己的網域/host/x —— 直接 404。
+       頁面是 http 而詞典是 https 時 scheme 不同，反而會被正確當成絕對網址，
+       所以這個 bug 在 localhost 上完全看不出來，一上 HTTPS 就爆。
+   (2) 可用時改走原生解壓。                                              */
+var HOOK_INJECT = HOOK_ANCHOR +
+  " url = url.replace(/^(https?:)\\/(?!\\/)/i, '$1//');" +
+  " if (self.__fastLoad) { self.__fastLoad(url, callback); return; }";
 
 function post(msg){ self.postMessage(msg); }
 
@@ -33,12 +43,12 @@ function nativeGunzip(buf){
 }
 
 var FILE_TIMEOUT = 90000;
-var bytesTotal = 0, filesDone = 0;
+var bytesTotal = 0, filesDone = 0, lastMode = "";
 
 /* 邊下載邊回報位元組數，讓進度條反映真實進度（最大的檔案有 5.9MB） */
 function fetchWithProgress(url){
   return fetch(url).then(function(r){
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) throw new Error("HTTP " + r.status + "（" + url + "）");
     if (!r.body || !r.body.getReader) return r.arrayBuffer();   // 舊瀏覽器：無串流
     var reader = r.body.getReader(), chunks = [], size = 0;
     return (function pump(){
@@ -79,30 +89,28 @@ function installFastLoad(){
   };
 }
 
-/* 抓原始碼、注入掛鉤、執行。回傳實際採用的模式。 */
+/* 抓原始碼、注入掛鉤、執行。回傳實際採用的模式。
+   注意：即使不支援原生解壓也一定要走注入，因為網址修正（見 HOOK_INJECT）
+   是正確性問題而非最佳化——沒有它，HTTPS 網頁上所有詞典請求都會 404。 */
 function loadKuromoji(libPath){
-  if (!canNativeGunzip){
-    importScripts(libPath);          // 舊瀏覽器：退回原版純 JS 解壓
-    return Promise.resolve("legacy");
-  }
+  if (typeof kuromoji !== "undefined") return Promise.resolve(lastMode);  // 重試時不必重載
   return fetch(libPath)
     .then(function(r){
-      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (!r.ok) throw new Error("HTTP " + r.status + "（" + libPath + "）");
       return r.text();
     })
     .then(function(src){
-      if (src.indexOf(HOOK_ANCHOR) < 0){
-        importScripts(libPath);       // 版本對不上：安全退回
-        return "legacy-no-anchor";
-      }
-      installFastLoad();
+      if (src.indexOf(HOOK_ANCHOR) < 0) throw new Error("找不到注入錨點");
+      if (canNativeGunzip) installFastLoad();
       // eslint-disable-next-line no-new-func
       (new Function(src.replace(HOOK_ANCHOR, HOOK_INJECT)))();
-      return "native";
+      return canNativeGunzip ? "native" : "patched-legacy";
     })
-    .catch(function(){
+    .catch(function(err){
+      /* 最後手段：原版行為。網址修正不會生效，HTTPS 下的 CDN 來源可能失敗，
+         但同源的相對路徑仍可運作。 */
       importScripts(libPath);
-      return "legacy-fetch-failed";
+      return "legacy(" + (err.message || err) + ")";
     });
 }
 
@@ -111,8 +119,10 @@ self.onmessage = function(e){
 
   if (d.type === "init"){
     if (tokenizer){ post({ type:"ready", reused:true }); return; }
+    bytesTotal = 0; filesDone = 0;        // 重試時歸零，否則進度會從上次的數字接續
     loadKuromoji(d.libPath)
       .then(function(mode){
+        lastMode = mode;
         if (typeof kuromoji === "undefined")
           throw new Error("kuromoji 未載入");
         post({ type:"stage", stage:"build", mode:mode });

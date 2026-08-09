@@ -20,12 +20,19 @@ const esc       = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
    沒有進度，畫面就無限停在「正在載入」。
    所以這裡先自己把檔案抓下來（可顯示進度、可逾時、可重試），
    抓完才交給 kuromoji，它再讀取時會直接命中瀏覽器快取。            */
+/* 詞典與 kuromoji.js 都放在本專案裡，與網頁同源。
+   某些網路環境（公司代理、DNS 過濾、擋 .gz 的規則）會讓公開 CDN 回 404，
+   同源就完全繞開這個問題。CDN 只留作備援。 */
+/* 必須解析成絕對網址：Worker 的基準路徑是 js/，
+   直接傳相對路徑會被解析成 js/dict/。 */
+const abs = p => new URL(p, location.href).href;
 const DIC_PATHS = [
+  abs("dict/"),
   "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/",
   "https://unpkg.com/kuromoji@0.1.2/dict/"
 ];
-/* 網址加 ?src=unpkg 可強制改用備援來源（某些網路會擋 jsdelivr） */
-if (/[?&]src=unpkg/.test(location.search)) DIC_PATHS.reverse();
+/* 網址加 ?src=cdn 可跳過本地詞典、強制使用 CDN */
+if (/[?&]src=cdn/.test(location.search)) DIC_PATHS.shift();
 /* 檔名與實測大小（bytes），用來算準確的進度百分比 */
 const DIC_FILES = [
   ["base.dat.gz",       3953000],
@@ -74,7 +81,7 @@ function loadDictionary(idx){
     return;
   }
   const base = DIC_PATHS[idx];
-  const host = base.split("/")[2];
+  const host = base.indexOf(location.origin) === 0 ? "本站" : base.split("/")[2];
   const t0 = Date.now();
   showProgress(0, DIC_TOTAL, "來源：" + host);
 
@@ -99,7 +106,9 @@ function loadDictionary(idx){
 }
 
 /* ---------- Worker：解壓、建索引、斷詞都在背景執行緒 ---------- */
-const KUROMOJI_LIB = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
+/* kuromoji.js 也放在本專案，同源才能 fetch 原始碼做注入（見 dict-worker.js）。
+   同樣要用絕對網址，否則在 Worker 裡會變成 js/js/kuromoji.js。 */
+const KUROMOJI_LIB = abs("js/kuromoji.js");
 let worker = null, workerSeq = 0, workerInit = null;
 const pending = new Map();
 
