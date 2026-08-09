@@ -113,6 +113,20 @@ IPADIC 詞典是 12 個檔案共 17MB（gzip 後）。要標出原型、活用�
 形態素詞典，這 17MB 沒有一個檔案可以省——輕量方案如 TinySegmenter、BudouX 只能切詞，
 給不出原型和讀音。所以重點不是把它變小，而是別讓它把瀏覽器搞死：
 
+0. **詞典自帶，不依賴第三方 CDN。**
+   `dict/` 裡的 12 個檔案就是 IPADIC，與網頁同源提供。除了少一個外部相依，
+   更重要的是避開下面這個坑。
+
+   kuromoji 用 `path.join(dic_path, filename)` 組網址，而 Node 的 `path.join`
+   會把 `https://host/` 正規化成 `https:/host/`（雙斜線被吃掉一個）。依 WHATWG
+   URL 規範，**當 scheme 與目前頁面相同時**，`https:/host/x` 會被當成相對參照，
+   解析成 `https://自己的網域/host/x` — 於是 HTTPS 網頁上每個詞典請求都 404。
+
+   陰險的是在 localhost 開發時頁面是 `http`、CDN 是 `https`，scheme 不同反而
+   會被正確解析為絕對網址，所以本機一切正常，一部署到 HTTPS 就全滅。
+   `js/dict-worker.js` 注入的掛鉤會先把網址修回來，這是正確性修正，
+   因此即使瀏覽器不支援原生解壓也一定要走注入路徑。
+
 1. **自行預抓，不交給 kuromoji 下載。**
    `kuromoji.builder().build()` 內部用 XHR 且未設 timeout，只要有一個檔案在行動網路
    上停滯，callback 就永遠不會被呼叫——不報錯、無進度、無限等待。改成自己用 fetch
