@@ -14,27 +14,138 @@ const hasKanji  = s => /[一-鿿㐀-䶿]/.test(s);
 const isPunct   = t => t.pos === "記号";
 const esc       = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
-/* ---------- 載入 kuromoji ---------- */
+/* ---------- 載入 kuromoji ----------
+   kuromoji 內部用的 XHR 沒有設 timeout：只要 12 個詞典檔中有任何一個
+   在行動網路上卡住，build() 的 callback 就永遠不會被呼叫——沒有錯誤、
+   沒有進度，畫面就無限停在「正在載入」。
+   所以這裡先自己把檔案抓下來（可顯示進度、可逾時、可重試），
+   抓完才交給 kuromoji，它再讀取時會直接命中瀏覽器快取。            */
 const DIC_PATHS = [
   "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/",
   "https://unpkg.com/kuromoji@0.1.2/dict/"
 ];
-function buildTokenizer(idx){
-  idx = idx || 0;
-  if (idx >= DIC_PATHS.length){
-    statusEl.className = "status error";
-    statusEl.textContent = "詞典載入失敗，請確認網路連線後重新整理。";
-    return;
-  }
-  kuromoji.builder({ dicPath: DIC_PATHS[idx] }).build(function(err, tk){
-    if (err){ console.warn("dict source failed:", DIC_PATHS[idx], err); return buildTokenizer(idx+1); }
-    tokenizer = tk;
-    statusEl.className = "status ready";
-    statusEl.textContent = "詞典就緒，可以開始分析了";
-    $("#analyze").disabled = false;
+/* 檔名與實測大小（bytes），用來算準確的進度百分比 */
+const DIC_FILES = [
+  ["base.dat.gz",       3953000],
+  ["cc.dat.gz",         1688000],
+  ["check.dat.gz",      3114000],
+  ["tid.dat.gz",        1604000],
+  ["tid_map.dat.gz",    1489000],
+  ["tid_pos.dat.gz",    5914000],
+  ["unk.dat.gz",           6000],
+  ["unk_char.dat.gz",      1000],
+  ["unk_compat.dat.gz",    1000],
+  ["unk_invoke.dat.gz",    1000],
+  ["unk_map.dat.gz",       1000],
+  ["unk_pos.dat.gz",       7000]
+];
+const DIC_TOTAL = DIC_FILES.reduce((a, f) => a + f[1], 0);
+const FILE_TIMEOUT = 60000;    // 單一檔案逾時
+const BUILD_TIMEOUT = 90000;   // 解壓／建索引逾時
+
+const MB = n => (n / 1048576).toFixed(1);
+
+function setStatus(cls, html){
+  statusEl.className = "status " + cls;
+  statusEl.innerHTML = html;
+}
+function showProgress(done, total, note){
+  const pct = Math.min(100, Math.round(done / total * 100));
+  setStatus("loading",
+    '<span>正在載入日文詞典 ' + MB(done) + " / " + MB(total) + " MB（" + pct + "%）" +
+    (note ? "　" + esc(note) : "") + "</span>" +
+    '<span class="bar"><i style="width:' + pct + '%"></i></span>');
+}
+function showError(msg, detail){
+  setStatus("error",
+    "<span>" + esc(msg) + "</span>" +
+    (detail ? '<span class="detail">' + esc(detail) + "</span>" : "") +
+    '<span><button type="button" id="retry-dict" class="ghost small">重新載入詞典</button></span>');
+  const b = document.getElementById("retry-dict");
+  if (b) b.onclick = () => { loadDictionary(0); };
+}
+
+/* 帶逾時的 fetch；回傳下載到的位元組數 */
+function fetchWithTimeout(url, ms){
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (ctrl) try{ ctrl.abort(); }catch(e){}
+      reject(new Error("逾時（" + (ms/1000) + " 秒無回應）"));
+    }, ms);
+    fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+      .then(r => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.arrayBuffer();
+      })
+      .then(buf => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        resolve(buf.byteLength);
+      })
+      .catch(e => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        reject(e);
+      });
   });
 }
-buildTokenizer(0);
+
+/* 依序抓完所有詞典檔，邊抓邊回報進度 */
+function prefetchDict(base, onProgress){
+  let done = 0;
+  return DIC_FILES.reduce((chain, f) =>
+    chain.then(() =>
+      fetchWithTimeout(base + f[0], FILE_TIMEOUT)
+        .catch(e => { throw new Error(f[0] + "：" + e.message); })
+        .then(n => { done += (n || f[1]); onProgress(done); })
+    ), Promise.resolve()).then(() => done);
+}
+
+function loadDictionary(idx){
+  idx = idx || 0;
+  if (idx >= DIC_PATHS.length){
+    showError("詞典載入失敗，兩個來源都連不上。",
+      "請確認網路連線；若使用行動網路或有廣告攔截器，請切換 Wi-Fi 或暫時停用後重試。");
+    return;
+  }
+  const base = DIC_PATHS[idx];
+  const host = base.split("/")[2];
+  const t0 = Date.now();
+  showProgress(0, DIC_TOTAL, "來源：" + host);
+
+  prefetchDict(base, d => showProgress(d, DIC_TOTAL, "來源：" + host))
+    .then(() => {
+      showProgress(DIC_TOTAL, DIC_TOTAL, "解壓並建立索引中，請稍候…");
+      return new Promise((resolve, reject) => {
+        const watchdog = setTimeout(
+          () => reject(new Error("建立索引逾時，裝置記憶體可能不足")), BUILD_TIMEOUT);
+        kuromoji.builder({ dicPath: base }).build(function(err, tk){
+          clearTimeout(watchdog);
+          if (err) reject(new Error(err.message || String(err))); else resolve(tk);
+        });
+      });
+    })
+    .then(tk => {
+      tokenizer = tk;
+      setStatus("ready", "詞典就緒，可以開始分析了（耗時 " +
+        ((Date.now() - t0) / 1000).toFixed(1) + " 秒）");
+      $("#analyze").disabled = false;
+    })
+    .catch(e => {
+      console.warn("dict source failed:", base, e);
+      if (idx + 1 < DIC_PATHS.length){
+        showProgress(0, DIC_TOTAL, "來源 " + host + " 失敗，改試備援來源…");
+        setTimeout(() => loadDictionary(idx + 1), 600);
+      } else {
+        showError("詞典載入失敗。", String(e.message || e));
+      }
+    });
+}
+loadDictionary(0);
 
 /* ---------- 發音 ---------- */
 const SPK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.8-1-3.3-2.5-4v8c1.5-.7 2.5-2.2 2.5-4zM14 1.2v2.1c3.4.9 6 4 6 7.7s-2.6 6.8-6 7.7v2.1c4.6-1 8-5 8-9.8s-3.4-8.8-8-9.8z"/></svg>';
