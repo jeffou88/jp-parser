@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>日文學習助手</title>
+<script>
+/* 本機檔案帶上時間戳，避免改了 dict.js 卻被瀏覽器快取擋住看不到變化。
+   （15MB 的日文詞典是 kuromoji 自己向 CDN 抓的，不受影響，仍然有快取。） */
+window.__v = "?v=" + Date.now();
+document.write('<link rel="stylesheet" href="style.css' + window.__v + '">');
+</script>
+</head>
+<body>
+<header>
+  <h1>日文學習助手 <span class="sub">貼上日文 → 自動分詞・標原型・查活用・逐字翻譯・發音</span></h1>
+  <div id="status" class="status loading">正在載入日文詞典（約 15MB，第一次較慢）…</div>
+</header>
+
+<main>
+  <section class="input-area">
+    <textarea id="input" placeholder="在這裡貼上日文，可以是一整篇文章（用空行分段）。
+
+例如：
+昨日は友達と映画を見に行きました。とても面白かったので、また見たいと思っています。
+
+明日の朝早く起きられるかどうか、ちょっと心配です。"></textarea>
+    <div class="controls">
+      <button id="analyze" disabled>分析</button>
+      <button id="sample" class="ghost">放入範例</button>
+      <button id="clear" class="ghost">清空</button>
+      <label class="chk"><input type="checkbox" id="furigana" checked> 顯示假名注音</label>
+      <label class="chk"><input type="checkbox" id="online" checked> 線上翻譯（段落翻譯／查不到的字）</label>
+    </div>
+    <div class="controls speech-bar" id="speech-bar">
+      <label class="chk"><input type="checkbox" id="autospeak" checked> 點單字時發音</label>
+      <label class="chk">語音包
+        <select id="voice-pick"></select>
+      </label>
+      <label class="chk">語速
+        <input type="range" id="rate" min="0.4" max="1.5" step="0.05" value="0.9">
+        <span id="rate-val" class="val">0.9×</span>
+      </label>
+      <label class="chk">音量
+        <input type="range" id="volume" min="0" max="1" step="0.05" value="1">
+        <span id="volume-val" class="val">100%</span>
+      </label>
+      <button id="preview-speak" class="ghost small">試聽</button>
+      <button id="stop-speak" class="ghost small">停止朗讀</button>
+    </div>
+  </section>
+
+  <section id="output"></section>
+</main>
+
+<div id="panel" class="panel hidden">
+  <button id="panel-close" class="panel-close" aria-label="關閉">&times;</button>
+  <div id="panel-body"></div>
+</div>
+<div id="backdrop" class="backdrop hidden"></div>
+
+<footer>
+  斷詞引擎：kuromoji.js (IPADIC)　·　線上翻譯：MyMemory API　·　詞典：內建常用詞 + 新字體→正體字對照
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js"></script>
+<script>
+["js/speech.js","js/kanji.js","js/dict.js","js/conjugate.js","js/app.js"]
+  .forEach(s => document.write('<scr' + 'ipt src="' + s + window.__v + '"></scr' + 'ipt>'));
+</script>
+</body>
+</html>
