@@ -93,6 +93,20 @@ Windows 到「設定 → 時間與語言 → 語言」新增日文並安裝語�
 
 線上翻譯查過的字會存在瀏覽器裡，同一個字不會重複查。
 
+## 瀏覽器支援
+
+桌面版 Chrome / Edge / Firefox / Safari，以及 iOS Safari、Android Chrome 都可以。
+
+程式碼刻意避開了 regex lookbehind（`(?<=...)`）這類較新的語法。
+原因值得記一筆：**regex 字面量的語法錯誤發生在「解析期」而不是「執行期」**，
+所以只要檔案裡有一個 Safari 不認得的 lookbehind，整個 `.js` 都不會執行——
+畫面和樣式完全正常，但每個按鈕都沒反應，而且 console 只有一行看不出所以然的
+SyntaxError。這在桌面 Chrome 上測不出來，只有實際拿舊 Safari 開才會現形。
+
+如果之後要加程式碼，避開 lookbehind、`?.`、`??`、`matchAll`、`replaceAll` 這幾個，
+就能維持相容性。頁面已內建 `window.onerror` 攔截，任何載入錯誤都會直接顯示在
+標題下方的狀態列，不會再變成無聲的失效。
+
 ## 已知限制
 
 - 免費 MyMemory API 有每日額度，額度用完段落翻譯會顯示失敗，但斷詞和原型分析不受影響。
