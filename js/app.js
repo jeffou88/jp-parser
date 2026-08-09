@@ -4,7 +4,7 @@
 (function(){
 "use strict";
 
-let tokenizer = null;
+let tokenizerReady = false;
 const $ = s => document.querySelector(s);
 const statusEl = $("#status");
 
@@ -24,6 +24,8 @@ const DIC_PATHS = [
   "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/",
   "https://unpkg.com/kuromoji@0.1.2/dict/"
 ];
+/* 網址加 ?src=unpkg 可強制改用備援來源（某些網路會擋 jsdelivr） */
+if (/[?&]src=unpkg/.test(location.search)) DIC_PATHS.reverse();
 /* 檔名與實測大小（bytes），用來算準確的進度百分比 */
 const DIC_FILES = [
   ["base.dat.gz",       3953000],
@@ -118,19 +120,9 @@ function loadDictionary(idx){
   showProgress(0, DIC_TOTAL, "來源：" + host);
 
   prefetchDict(base, d => showProgress(d, DIC_TOTAL, "來源：" + host))
+    .then(() => buildInWorker(base, t0))
     .then(() => {
-      showProgress(DIC_TOTAL, DIC_TOTAL, "解壓並建立索引中，請稍候…");
-      return new Promise((resolve, reject) => {
-        const watchdog = setTimeout(
-          () => reject(new Error("建立索引逾時，裝置記憶體可能不足")), BUILD_TIMEOUT);
-        kuromoji.builder({ dicPath: base }).build(function(err, tk){
-          clearTimeout(watchdog);
-          if (err) reject(new Error(err.message || String(err))); else resolve(tk);
-        });
-      });
-    })
-    .then(tk => {
-      tokenizer = tk;
+      tokenizerReady = true;
       setStatus("ready", "詞典就緒，可以開始分析了（耗時 " +
         ((Date.now() - t0) / 1000).toFixed(1) + " 秒）");
       $("#analyze").disabled = false;
@@ -145,7 +137,74 @@ function loadDictionary(idx){
       }
     });
 }
-loadDictionary(0);
+
+/* ---------- Worker：解壓、建索引、斷詞都在背景執行緒 ---------- */
+const KUROMOJI_LIB = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
+let worker = null, workerSeq = 0, workerInit = null;
+const pending = new Map();
+
+function ensureWorker(){
+  if (worker) return worker;
+  worker = new Worker("js/dict-worker.js" + (window.__v || ""));
+  worker.onmessage = e => {
+    const d = e.data || {};
+    if (d.type === "tokens"){
+      const p = pending.get(d.id);
+      if (!p) return;
+      pending.delete(d.id);
+      if (d.error) p.reject(new Error(d.error)); else p.resolve(d.results);
+      return;
+    }
+    if (workerInit){
+      if (d.type === "ready") workerInit.resolve();
+      else if (d.type === "error") workerInit.reject(new Error(d.message));
+    }
+  };
+  worker.onerror = () => {
+    const err = new Error("無法載入 js/dict-worker.js");
+    if (workerInit) workerInit.reject(err);
+    pending.forEach(p => p.reject(err));
+    pending.clear();
+  };
+  return worker;
+}
+
+function buildInWorker(dicPath, t0){
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const w = ensureWorker();
+    /* Worker 不阻塞主執行緒，所以這個計時器與逾時保護真的排得進去 */
+    const tick = setInterval(() => {
+      showProgress(DIC_TOTAL, DIC_TOTAL,
+        "解壓並建立索引中（背景執行，已 " + ((Date.now() - t0) / 1000).toFixed(0) + " 秒）…");
+    }, 1000);
+    const watchdog = setTimeout(() => finish(reject,
+      new Error("建立索引逾時（" + (BUILD_TIMEOUT / 1000) + " 秒），裝置記憶體可能不足")), BUILD_TIMEOUT);
+    function finish(fn, arg){
+      if (done) return; done = true;
+      clearInterval(tick); clearTimeout(watchdog); workerInit = null; fn(arg);
+    }
+    workerInit = { resolve: () => finish(resolve), reject: e => finish(reject, e) };
+    showProgress(DIC_TOTAL, DIC_TOTAL, "解壓並建立索引中（背景執行）…");
+    w.postMessage({ type:"init", dicPath: dicPath, libPath: KUROMOJI_LIB });
+  });
+}
+
+/* 把多段文字一次送進 Worker 斷詞 */
+function tokenizeAll(texts){
+  if (!texts.length) return Promise.resolve([]);
+  return new Promise((resolve, reject) => {
+    const id = ++workerSeq;
+    pending.set(id, { resolve, reject });
+    ensureWorker().postMessage({ type:"tokenize", id: id, texts: texts });
+  });
+}
+
+if (typeof Worker === "undefined"){
+  showError("這個瀏覽器不支援 Web Worker，無法載入詞典。", "請改用較新版本的瀏覽器。");
+} else {
+  loadDictionary(0);
+}
 
 /* ---------- 發音 ---------- */
 const SPK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.8-1-3.3-2.5-4v8c1.5-.7 2.5-2.2 2.5-4zM14 1.2v2.1c3.4.9 6 4 6 7.7s-2.6 6.8-6 7.7v2.1c4.6-1 8-5 8-9.8s-3.4-8.8-8-9.8z"/></svg>';
@@ -346,20 +405,26 @@ function baseOf(t){
   return (t.basic_form && t.basic_form !== "*") ? t.basic_form : t.surface_form;
 }
 
-/* 取辭書形的平假名讀音（再丟回 kuromoji 斷一次），結果快取起來 */
+/* 辭書形的平假名讀音。斷詞在 Worker 裡，所以這裡只讀快取；
+   需要的詞會在 render() 之前先批次送去 Worker 補齊。 */
 const kanaCache = new Map();
 function kanaOf(word){
-  if (!tokenizer || !word) return null;
-  if (kanaCache.has(word)) return kanaCache.get(word);
-  let out = null;
-  try{
-    const ts = tokenizer.tokenize(word);
-    if (ts.length && ts.every(t => t.reading))
-      out = kata2hira(ts.map(t => t.reading).join(""));
-    if (out && !/^[ぁ-んー]+$/.test(out)) out = null;
-  }catch(e){}
-  kanaCache.set(word, out);
-  return out;
+  return (word && kanaCache.has(word)) ? kanaCache.get(word) : null;
+}
+function kanaFromTokens(ts){
+  if (!ts || !ts.length) return null;
+  for (let i = 0; i < ts.length; i++) if (!ts[i].reading) return null;
+  const out = kata2hira(ts.map(t => t.reading).join(""));
+  return /^[ぁ-んー]+$/.test(out) ? out : null;
+}
+/* 一次補齊多個詞的讀音 */
+function fillKana(words){
+  const need = [];
+  words.forEach(w => { if (w && !kanaCache.has(w) && need.indexOf(w) < 0) need.push(w); });
+  if (!need.length) return Promise.resolve();
+  return tokenizeAll(need)
+    .then(lists => { need.forEach((w, i) => kanaCache.set(w, kanaFromTokens(lists[i]))); })
+    .catch(() => { need.forEach(w => kanaCache.set(w, null)); });
 }
 
 /* 動詞連用形（ます形語幹）被當成名詞時，還原成辭書形：泳ぎ→泳ぐ、食べ→食べる */
@@ -506,17 +571,38 @@ function translateParagraph(text){
 const output = $("#output");
 let GROUP_STORE = [];   // 供詳細面板取用
 
+/* 斷詞在 Worker，所以分兩步：先把整篇送去斷詞並補齊讀音，回來再一次畫完。 */
 function render(text){
+  const paragraphs = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  if (!paragraphs.length){ output.innerHTML = ""; return; }
+
+  tokenizeAll(paragraphs)
+    .then(tokenLists => {
+      const groupLists = tokenLists.map(groupTokens);
+      /* 活用表需要辭書形的讀音；サ変名詞另外需要「〜する」的讀音 */
+      const words = [];
+      groupLists.forEach(gs => gs.forEach(g => {
+        if (g.punct) return;
+        const head = g.suruHead || g.head;
+        words.push(baseOf(head));
+        if (head.pos === "名詞" && head.pos_detail_1 === "サ変接続") words.push(g.surface + "する");
+      }));
+      return fillKana(words).then(() => paint(paragraphs, groupLists));
+    })
+    .catch(e => {
+      output.innerHTML = '<div class="para"><b>分析失敗：</b>' + esc(e.message || String(e)) + "</div>";
+    });
+}
+
+function paint(paragraphs, groupLists){
   output.innerHTML = "";
   GROUP_STORE = [];
-  const paragraphs = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
   const wantOnline = $("#online").checked;
   const showRuby   = $("#furigana").checked;
   const unknown    = new Map();   // base -> [gloss element,…]
 
   paragraphs.forEach((para, pi) => {
-    const tokens = tokenizer.tokenize(para);
-    const groups = groupTokens(tokens);
+    const groups = groupLists[pi];
 
     const card = document.createElement("div");
     card.className = "para";
@@ -744,10 +830,10 @@ initSpeech();
 $("#analyze").onclick = () => {
   const text = $("#input").value.trim();
   if (!text){ output.innerHTML = ""; return; }
-  if (!tokenizer) return;
+  if (!tokenizerReady) return;
   Speech.stop();
   output.innerHTML = '<div class="para">分析中…</div>';
-  setTimeout(() => render(text), 10);
+  render(text);
 };
 $("#clear").onclick = () => { $("#input").value = ""; output.innerHTML = ""; Speech.stop(); };
 $("#sample").onclick = () => {

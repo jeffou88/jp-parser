@@ -74,7 +74,8 @@ window.addEventListener("error", function(e){
   斷詞引擎：kuromoji.js (IPADIC)　·　線上翻譯：MyMemory API　·　詞典：內建常用詞 + 新字體→正體字對照
 </footer>
 
-<script src="https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js"></script>
+<!-- kuromoji 只在 Worker 裡用（js/dict-worker.js 自行 importScripts），
+     主執行緒不需要載入這 300KB。 -->
 <script>
 ["js/speech.js","js/kanji.js","js/dict.js","js/conjugate.js","js/app.js"]
   .forEach(s => document.write('<scr' + 'ipt src="' + s + window.__v + '"></scr' + 'ipt>'));
