@@ -43,7 +43,7 @@ const DIC_FILES = [
 ];
 const DIC_TOTAL = DIC_FILES.reduce((a, f) => a + f[1], 0);
 const FILE_TIMEOUT = 60000;    // 單一檔案逾時
-const BUILD_TIMEOUT = 90000;   // 解壓／建索引逾時
+const BUILD_TIMEOUT = 300000;  // 解壓／建索引逾時（慢裝置上純 JS 解壓可能要數分鐘）
 
 const MB = n => (n / 1048576).toFixed(1);
 
@@ -124,7 +124,8 @@ function loadDictionary(idx){
     .then(() => {
       tokenizerReady = true;
       setStatus("ready", "詞典就緒，可以開始分析了（耗時 " +
-        ((Date.now() - t0) / 1000).toFixed(1) + " 秒）");
+        ((Date.now() - t0) / 1000).toFixed(1) + " 秒" +
+        (dictMode && dictMode !== "native" ? "，未使用原生解壓" : "") + "）");
       $("#analyze").disabled = false;
     })
     .catch(e => {
@@ -158,6 +159,7 @@ function ensureWorker(){
     if (workerInit){
       if (d.type === "ready") workerInit.resolve();
       else if (d.type === "error") workerInit.reject(new Error(d.message));
+      else if (d.type === "stage") workerInit.onStage(d);
     }
   };
   worker.onerror = () => {
@@ -169,23 +171,38 @@ function ensureWorker(){
   return worker;
 }
 
+let dictMode = "";
 function buildInWorker(dicPath, t0){
   return new Promise((resolve, reject) => {
-    let done = false;
+    let done = false, note = "解壓並建立索引中（背景執行）";
     const w = ensureWorker();
+    const secs = () => ((Date.now() - t0) / 1000).toFixed(0);
     /* Worker 不阻塞主執行緒，所以這個計時器與逾時保護真的排得進去 */
-    const tick = setInterval(() => {
-      showProgress(DIC_TOTAL, DIC_TOTAL,
-        "解壓並建立索引中（背景執行，已 " + ((Date.now() - t0) / 1000).toFixed(0) + " 秒）…");
-    }, 1000);
+    const tick = setInterval(
+      () => showProgress(DIC_TOTAL, DIC_TOTAL, note + "，已 " + secs() + " 秒…"), 1000);
     const watchdog = setTimeout(() => finish(reject,
-      new Error("建立索引逾時（" + (BUILD_TIMEOUT / 1000) + " 秒），裝置記憶體可能不足")), BUILD_TIMEOUT);
+      new Error("建立索引逾時（" + (BUILD_TIMEOUT / 1000) + " 秒）。" +
+                "這台裝置的效能或記憶體可能不足以在瀏覽器內處理 17MB 的日文詞典。")), BUILD_TIMEOUT);
     function finish(fn, arg){
       if (done) return; done = true;
       clearInterval(tick); clearTimeout(watchdog); workerInit = null; fn(arg);
     }
-    workerInit = { resolve: () => finish(resolve), reject: e => finish(reject, e) };
-    showProgress(DIC_TOTAL, DIC_TOTAL, "解壓並建立索引中（背景執行）…");
+    workerInit = {
+      resolve: () => finish(resolve),
+      reject:  e => finish(reject, e),
+      onStage: d => {
+        if (d.stage === "decompress"){
+          note = "解壓詞典中（原生解壓 " + d.done + "/12 檔）";
+        } else if (d.stage === "build"){
+          dictMode = d.mode || "";
+          note = (dictMode === "native")
+            ? "建立索引中（背景執行）"
+            : "解壓並建立索引中（此瀏覽器不支援原生解壓，較慢）";
+        }
+        showProgress(DIC_TOTAL, DIC_TOTAL, note + "，已 " + secs() + " 秒…");
+      }
+    };
+    showProgress(DIC_TOTAL, DIC_TOTAL, note + "…");
     w.postMessage({ type:"init", dicPath: dicPath, libPath: KUROMOJI_LIB });
   });
 }
