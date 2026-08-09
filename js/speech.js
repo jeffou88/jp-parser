@@ -82,12 +82,23 @@ function startKeepAlive(){
   }, 9000);
 }
 
+/* 依標點斷句、標點留在句尾。
+   不用 regex lookbehind：Safari 16.4 以前不支援，且屬解析期錯誤，會讓整個檔案失效。 */
+function splitAfter(text, marks){
+  const out = []; let cur = "";
+  for (let i = 0; i < text.length; i++){
+    cur += text.charAt(i);
+    if (marks.indexOf(text.charAt(i)) >= 0){ out.push(cur); cur = ""; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 /* text 可以是字串；長句會依標點切開分段唸，避免被截斷 */
 function speak(text, done){
   if (!available() || !text) return false;
   stop();
-  queue = String(text)
-    .split(/(?<=[。．！？!?、，,])/)
+  queue = splitAfter(String(text), "。．！？!?、，,")
     .map(s => s.trim())
     .filter(Boolean);
   if (!queue.length) queue = [String(text)];

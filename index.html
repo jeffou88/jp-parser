@@ -9,6 +9,17 @@
    （15MB 的日文詞典是 kuromoji 自己向 CDN 抓的，不受影響，仍然有快取。） */
 window.__v = "?v=" + Date.now();
 document.write('<link rel="stylesheet" href="style.css' + window.__v + '">');
+
+/* 把 JS 錯誤直接顯示在畫面上。少了這個，一個語法錯誤就會讓頁面
+   「看起來正常但完全沒反應」，在別人的裝置上根本無從查起。 */
+window.addEventListener("error", function(e){
+  var box = document.getElementById("status");
+  if (!box) return;
+  box.className = "status error";
+  box.textContent = "程式載入失敗：" + (e.message || e.type) +
+    (e.filename ? "（" + String(e.filename).split("/").pop() + " 第 " + e.lineno + " 行）" : "") +
+    "　請把這行訊息回報。";
+}, true);
 </script>
 </head>
 <body>

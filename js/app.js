@@ -363,8 +363,20 @@ function mmTranslate(text){
     throw new Error("no translation");
   });
 }
+/* 依句尾標點斷句，並把標點留在句子裡。
+   刻意不用 regex lookbehind：Safari 16.4 以前不支援，而且那是「解析期」錯誤，
+   會讓整個 js 檔案無法執行（畫面正常但所有功能失效）。 */
+function splitAfter(text, marks){
+  const out = []; let cur = "";
+  for (let i = 0; i < text.length; i++){
+    cur += text.charAt(i);
+    if (marks.indexOf(text.charAt(i)) >= 0){ out.push(cur); cur = ""; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 function chunkSentences(text, max){
-  const parts = text.split(/(?<=[。．！？!?])/).filter(s => s.trim());
+  const parts = splitAfter(text, "。．！？!?").filter(s => s.trim());
   const out = []; let cur = "";
   for (const p of parts){
     if ((cur + p).length > max){ if (cur) out.push(cur); cur = p; }
