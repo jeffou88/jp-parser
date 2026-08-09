@@ -42,7 +42,6 @@ const DIC_FILES = [
   ["unk_pos.dat.gz",       7000]
 ];
 const DIC_TOTAL = DIC_FILES.reduce((a, f) => a + f[1], 0);
-const FILE_TIMEOUT = 60000;    // 單一檔案逾時
 const BUILD_TIMEOUT = 300000;  // 解壓／建索引逾時（慢裝置上純 JS 解壓可能要數分鐘）
 
 const MB = n => (n / 1048576).toFixed(1);
@@ -67,46 +66,6 @@ function showError(msg, detail){
   if (b) b.onclick = () => { loadDictionary(0); };
 }
 
-/* 帶逾時的 fetch；回傳下載到的位元組數 */
-function fetchWithTimeout(url, ms){
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      if (ctrl) try{ ctrl.abort(); }catch(e){}
-      reject(new Error("逾時（" + (ms/1000) + " 秒無回應）"));
-    }, ms);
-    fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
-      .then(r => {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.arrayBuffer();
-      })
-      .then(buf => {
-        if (settled) return;
-        settled = true; clearTimeout(timer);
-        resolve(buf.byteLength);
-      })
-      .catch(e => {
-        if (settled) return;
-        settled = true; clearTimeout(timer);
-        reject(e);
-      });
-  });
-}
-
-/* 依序抓完所有詞典檔，邊抓邊回報進度 */
-function prefetchDict(base, onProgress){
-  let done = 0;
-  return DIC_FILES.reduce((chain, f) =>
-    chain.then(() =>
-      fetchWithTimeout(base + f[0], FILE_TIMEOUT)
-        .catch(e => { throw new Error(f[0] + "：" + e.message); })
-        .then(n => { done += (n || f[1]); onProgress(done); })
-    ), Promise.resolve()).then(() => done);
-}
-
 function loadDictionary(idx){
   idx = idx || 0;
   if (idx >= DIC_PATHS.length){
@@ -119,8 +78,8 @@ function loadDictionary(idx){
   const t0 = Date.now();
   showProgress(0, DIC_TOTAL, "來源：" + host);
 
-  prefetchDict(base, d => showProgress(d, DIC_TOTAL, "來源：" + host))
-    .then(() => buildInWorker(base, t0))
+  /* 下載也在 Worker 裡做，主執行緒不再重複抓一次（以前會下載兩次） */
+  buildInWorker(base, t0, host)
     .then(() => {
       tokenizerReady = true;
       setStatus("ready", "詞典就緒，可以開始分析了（耗時 " +
@@ -172,17 +131,28 @@ function ensureWorker(){
 }
 
 let dictMode = "";
-function buildInWorker(dicPath, t0){
+function buildInWorker(dicPath, t0, host){
   return new Promise((resolve, reject) => {
-    let done = false, note = "解壓並建立索引中（背景執行）";
+    let done = false, bytes = 0, note = "連線中", stalled = 0;
     const w = ensureWorker();
     const secs = () => ((Date.now() - t0) / 1000).toFixed(0);
+    const paint = () => showProgress(bytes, DIC_TOTAL,
+      note + "（" + host + "，已 " + secs() + " 秒）");
+
     /* Worker 不阻塞主執行緒，所以這個計時器與逾時保護真的排得進去 */
-    const tick = setInterval(
-      () => showProgress(DIC_TOTAL, DIC_TOTAL, note + "，已 " + secs() + " 秒…"), 1000);
+    let lastBytes = -1;
+    const tick = setInterval(() => {
+      if (bytes === lastBytes && note.indexOf("下載") === 0){
+        stalled++;
+        if (stalled === 20) note = "下載停滯中，網路可能不穩";
+      } else { stalled = 0; if (note.indexOf("停滯") > 0) note = "下載詞典中"; }
+      lastBytes = bytes;
+      paint();
+    }, 1000);
+
     const watchdog = setTimeout(() => finish(reject,
-      new Error("建立索引逾時（" + (BUILD_TIMEOUT / 1000) + " 秒）。" +
-                "這台裝置的效能或記憶體可能不足以在瀏覽器內處理 17MB 的日文詞典。")), BUILD_TIMEOUT);
+      new Error("逾時（" + (BUILD_TIMEOUT / 1000) + " 秒）。已下載 " + MB(bytes) + " / " +
+                MB(DIC_TOTAL) + " MB，停在「" + note + "」。")), BUILD_TIMEOUT);
     function finish(fn, arg){
       if (done) return; done = true;
       clearInterval(tick); clearTimeout(watchdog); workerInit = null; fn(arg);
@@ -191,18 +161,17 @@ function buildInWorker(dicPath, t0){
       resolve: () => finish(resolve),
       reject:  e => finish(reject, e),
       onStage: d => {
-        if (d.stage === "decompress"){
-          note = "解壓詞典中（原生解壓 " + d.done + "/12 檔）";
-        } else if (d.stage === "build"){
+        if (d.stage === "download"){ bytes = d.bytes; note = "下載詞典中"; }
+        else if (d.stage === "file"){ bytes = d.bytes; note = "下載並解壓中（" + d.done + "/12 檔）"; }
+        else if (d.stage === "build"){
           dictMode = d.mode || "";
-          note = (dictMode === "native")
-            ? "建立索引中（背景執行）"
-            : "解壓並建立索引中（此瀏覽器不支援原生解壓，較慢）";
+          note = (dictMode === "native") ? "下載詞典中"
+               : "下載並解壓中（此瀏覽器不支援原生解壓，較慢）";
         }
-        showProgress(DIC_TOTAL, DIC_TOTAL, note + "，已 " + secs() + " 秒…");
+        paint();
       }
     };
-    showProgress(DIC_TOTAL, DIC_TOTAL, note + "…");
+    paint();
     w.postMessage({ type:"init", dicPath: dicPath, libPath: KUROMOJI_LIB });
   });
 }

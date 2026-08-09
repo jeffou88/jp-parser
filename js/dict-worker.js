@@ -32,18 +32,47 @@ function nativeGunzip(buf){
   return new Response(stream).arrayBuffer();
 }
 
-var loadedFiles = 0;
+var FILE_TIMEOUT = 90000;
+var bytesTotal = 0, filesDone = 0;
+
+/* 邊下載邊回報位元組數，讓進度條反映真實進度（最大的檔案有 5.9MB） */
+function fetchWithProgress(url){
+  return fetch(url).then(function(r){
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.body || !r.body.getReader) return r.arrayBuffer();   // 舊瀏覽器：無串流
+    var reader = r.body.getReader(), chunks = [], size = 0;
+    return (function pump(){
+      return reader.read().then(function(res){
+        if (res.done){
+          var out = new Uint8Array(size), at = 0;
+          for (var i = 0; i < chunks.length; i++){ out.set(chunks[i], at); at += chunks[i].length; }
+          return out.buffer;
+        }
+        chunks.push(res.value); size += res.value.length;
+        bytesTotal += res.value.length;
+        post({ type:"stage", stage:"download", bytes:bytesTotal });
+        return pump();
+      });
+    })();
+  });
+}
+
+function withTimeout(promise, ms, label){
+  return new Promise(function(resolve, reject){
+    var t = setTimeout(function(){ reject(new Error(label + "：逾時（" + (ms/1000) + " 秒無回應）")); }, ms);
+    promise.then(function(v){ clearTimeout(t); resolve(v); },
+                 function(e){ clearTimeout(t); reject(e); });
+  });
+}
+
 function installFastLoad(){
   self.__fastLoad = function(url, callback){
-    fetch(url)
-      .then(function(r){
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.arrayBuffer();
-      })
+    var name = url.split("/").pop();
+    withTimeout(fetchWithProgress(url), FILE_TIMEOUT, name)
       .then(nativeGunzip)
       .then(function(buf){
-        loadedFiles++;
-        post({ type:"stage", stage:"decompress", done:loadedFiles, file:url.split("/").pop() });
+        filesDone++;
+        post({ type:"stage", stage:"file", done:filesDone, file:name, bytes:bytesTotal });
         callback(null, buf);
       })
       .catch(function(err){ callback(err, null); });
