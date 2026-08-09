@@ -13,6 +13,28 @@
 第一次開啟會從 CDN 下載約 15MB 的日文詞典（kuromoji IPADIC），會等十幾秒；
 之後瀏覽器會快取，開啟就很快。
 
+## 部署到 GitHub Pages
+
+這是純靜態網站，放上去就能跑。這個資料夾已經是一個 git repo 並完成第一次 commit。
+
+1. 到 <https://github.com/new> 建一個 repo，名稱建議 `jp-parser`，**不要**勾選任何
+   「Add README / .gitignore / license」（否則會跟本地的 commit 衝突）。
+2. 在這個資料夾執行（把 `<你的帳號>` 換成你的 GitHub 帳號）：
+
+   ```
+   git remote add origin https://github.com/<你的帳號>/jp-parser.git
+   git push -u origin main
+   ```
+
+3. repo 頁面 → **Settings → Pages** → Source 選 `Deploy from a branch`，
+   branch 選 `main`、資料夾選 `/ (root)` → Save。
+4. 等一兩分鐘，網址是 `https://<你的帳號>.github.io/jp-parser/`。
+
+之後改了字典要更新線上版，就 `git add -A && git commit -m "加單字" && git push`。
+
+**不能部署成 claude.ai 的 Artifact**：Artifact 有嚴格的 CSP，會擋掉所有外部主機的請求，
+kuromoji 的 CDN 腳本和 17MB 詞典都載不進來，等於整個工具失效。
+
 ## 功能
 
 | 功能 | 說明 |
